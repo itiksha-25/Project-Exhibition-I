@@ -1,9 +1,11 @@
+
 """
 Tier-2 Semantic Centroid Vector Router
 Latency Budget: < 10.0 ms
 Om's Research Pillar: Semantic Embedding Similarity against Domain Centroids
 """
 
+import hashlib
 import math
 import re
 from typing import Dict, List, Tuple
@@ -90,24 +92,33 @@ def tokenize_query(query: str) -> List[str]:
     return tokens + bigrams + trigrams
 
 
+
 def compute_query_vector(query: str) -> np.ndarray:
     """
     Projects text into normalized hybrid semantic-lexical space.
-    Combines domain anchor centroids with fast open-vocabulary hashing.
+    Combines domain anchor centroids with deterministic open-vocabulary hashing.
     """
     tokens = tokenize_query(query)
     vec = np.zeros(TOTAL_DIM, dtype=np.float32)
+
     for t in tokens:
         if t in TERM_TO_IDX:
             vec[TERM_TO_IDX[t]] += 2.0
-        # Open-vocabulary hash feature
-        h_idx = VOCAB_DIM + (abs(hash(t)) % HASH_BUCKETS)
+
+        # Deterministic open-vocabulary hash feature
+        hash_bytes = hashlib.sha256(t.encode("utf-8")).digest()[:8]
+        hash_value = int.from_bytes(hash_bytes, byteorder="big")
+        h_idx = VOCAB_DIM + (hash_value % HASH_BUCKETS)
+
         vec[h_idx] += 1.0
 
+    # Normalize the vector
     norm = np.linalg.norm(vec)
     if norm > 0:
         vec /= norm
+
     return vec
+
 
 
 def evaluate_centroids(query: str) -> Dict[str, float]:
