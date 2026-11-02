@@ -117,6 +117,17 @@ async def chat_endpoint(req: ChatRequest):
 
     if req.stream:
         async def event_generator():
+
+            import asyncio
+            import os
+
+            actual_model = route_res.target_model
+            provider = "ollama"
+
+            if os.getenv("GEMINI_API_KEY"):
+                actual_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+                provider = "gemini"
+
             # Send initial metadata header event
             initial_event = {
                 "type": "meta",
@@ -127,6 +138,10 @@ async def chat_endpoint(req: ChatRequest):
                     "lookup_latency_ms": mem_latency_ms
                 }
             }
+
+            initial_event["routing"]["target_model"] = actual_model
+            initial_event["routing"]["provider"] = provider
+            
             yield f"data: {json.dumps(initial_event)}\n\n"
 
             accumulated_tokens = []
@@ -137,23 +152,46 @@ async def chat_endpoint(req: ChatRequest):
                 target_model=route_res.target_model,
                 domain=route_res.domain
             ):
-                if chunk["type"] == "error":
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                    return
+                if provider == "gemini":
+                    from core.providers.gemini_provider import generate_response
 
-                if chunk["type"] == "token":
-                    accumulated_tokens.append(chunk["content"])
-                elif chunk["type"] == "ttft":
-                    ttft_value = chunk["ttft_ms"]
+                    try:
+                        full_response = await asyncio.to_thread(
+                            generate_response,
+                            compiled_messages,
+                            actual_model
+                        )
+                    except RuntimeError as exc:
+                        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                        return
 
-                yield f"data: {json.dumps(chunk)}\n\n"
+                    accumulated_tokens.append(full_response)
+
+                    yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+
+                else:
+                    async for chunk in model_switcher.stream_chat_response(
+                        messages=compiled_messages,
+                        target_model=route_res.target_model,
+                        domain=route_res.domain
+                    ):
+                        if chunk["type"] == "error":
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            return
+
+                        if chunk["type"] == "token":
+                            accumulated_tokens.append(chunk["content"])
+                        elif chunk["type"] == "ttft":
+                            ttft_value = chunk["ttft_ms"]
+
+                        yield f"data: {json.dumps(chunk)}\n\n"
 
             # Auto-save interaction to vector memory
             full_response = "".join(accumulated_tokens)
             memory_store.insert(
                 text=f"User: {req.query[:80]} | Response: {full_response[:100]}",
                 domain=route_res.domain,
-                source_model=route_res.target_model,
+                source_model=actual_model,
                 importance=0.75
             )
 
