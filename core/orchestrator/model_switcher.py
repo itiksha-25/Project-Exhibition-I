@@ -151,14 +151,9 @@ class ModelSwitcher:
             # Approximate token count by word count * 1.3
             token_count = max(1, int(len(response_text.split()) * 1.3))
         except Exception as e:
-            # Fallback to local expert response
-            t_first_token = time.perf_counter()
-            ttft_ms = 24.5
-            response_text = (
-                f"[Local {domain.upper()} Specialist: {resolved_model}]\n\n"
-                f"{KNOWLEDGE_RESPONSES.get(domain, KNOWLEDGE_RESPONSES['general'])}\n\n"
-                f"(Note: Offline local expert response synthesized; Ollama status: {str(e)[:60]})"
-            )
+            raise RuntimeError(
+                f"Ollama inference failed: {e}"
+            ) from e
             token_count = max(1, int(len(response_text.split()) * 1.3))
 
         t_end = time.perf_counter()
@@ -223,15 +218,12 @@ class ModelSwitcher:
                     token_count += 1
                     yield {"type": "token", "content": token}
 
-        except Exception as e:
-            # Fallback simulated token stream
-            fallback_text = KNOWLEDGE_RESPONSES.get(domain, KNOWLEDGE_RESPONSES["general"])
-            yield {"type": "ttft", "ttft_ms": 18.0}
-            words = fallback_text.split(" ")
-            for w in words:
-                yield {"type": "token", "content": w + " "}
-                token_count += 1
-                await asyncio.sleep(0.02)  # Simulate smooth token generation
+        except Exception:
+            yield {
+                "type": "error",
+                "error": "Ollama inference failed. No fallback response was generated."
+            }
+            return
 
         t_end = time.perf_counter()
         total_time = max(0.001, t_end - t_start)

@@ -137,6 +137,10 @@ async def chat_endpoint(req: ChatRequest):
                 target_model=route_res.target_model,
                 domain=route_res.domain
             ):
+                if chunk["type"] == "error":
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    return
+
                 if chunk["type"] == "token":
                     accumulated_tokens.append(chunk["content"])
                 elif chunk["type"] == "ttft":
@@ -157,11 +161,17 @@ async def chat_endpoint(req: ChatRequest):
 
     else:
         # Non-streaming fallback
-        response_text, telemetry = model_switcher.generate_chat_response(
-            messages=compiled_messages,
-            target_model=route_res.target_model,
-            domain=route_res.domain
-        )
+        try:
+            response_text, telemetry = model_switcher.generate_chat_response(
+                messages=compiled_messages,
+                target_model=route_res.target_model,
+                domain=route_res.domain
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Inference unavailable. No model provider could complete the request."
+            ) from exc
 
         # Record telemetry
         telemetry_tracker.record_inference(
