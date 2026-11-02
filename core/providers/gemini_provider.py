@@ -3,6 +3,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+import time
 
 
 def _extract_text(message):
@@ -55,8 +56,9 @@ def _convert_messages(messages):
     return contents
 
 
+
 def generate_response(messages, model=None):
-    """Generate a response using Google's Gemini REST API."""
+    """Generate a response using Google's Gemini REST API with retries."""
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
@@ -87,18 +89,38 @@ def generate_response(messages, model=None):
         method="POST"
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
+    result = None
 
-    except urllib.error.HTTPError as exc:
-        # Do not expose request credentials or raw upstream details.
-        raise RuntimeError(
-            f"Gemini API request failed with HTTP {exc.code}."
-        ) from exc
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            break
 
-    except urllib.error.URLError as exc:
-        raise RuntimeError("Could not connect to Gemini API.") from exc
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (408, 429, 500, 502, 503, 504):
+                raise RuntimeError(
+                    f"Gemini API request failed with HTTP {exc.code}."
+                ) from exc
+
+            if attempt == 3:
+                raise RuntimeError(
+                    f"Gemini is temporarily unavailable (HTTP {exc.code}) "
+                    "after four attempts. Please retry shortly."
+                ) from exc
+
+            time.sleep(2 ** attempt)
+
+        except urllib.error.URLError as exc:
+            if attempt == 3:
+                raise RuntimeError(
+                    "Could not connect to Gemini API after four attempts."
+                ) from exc
+
+            time.sleep(2 ** attempt)
+
+    if result is None:
+        raise RuntimeError("Gemini did not return a response.")
 
     candidates = result.get("candidates", [])
 
@@ -106,8 +128,11 @@ def generate_response(messages, model=None):
         raise RuntimeError("Gemini returned no response candidates.")
 
     parts = candidates[0].get("content", {}).get("parts", [])
+
     answer = "\n".join(
-        part["text"] for part in parts if isinstance(part.get("text"), str)
+        part["text"]
+        for part in parts
+        if isinstance(part.get("text"), str)
     ).strip()
 
     if not answer:
