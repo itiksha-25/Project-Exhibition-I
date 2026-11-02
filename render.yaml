@@ -1,0 +1,12 @@
+
+services:
+  - type: web
+    name: intelligent-slm-routing-engine
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/system/stats
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
