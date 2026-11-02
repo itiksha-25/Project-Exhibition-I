@@ -125,7 +125,10 @@ async def chat_endpoint(req: ChatRequest):
             provider = "ollama"
 
             if os.getenv("GEMINI_API_KEY"):
-                actual_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+                actual_model = os.getenv(
+                    "GEMINI_MODEL",
+                    "gemini-3.8-flash"
+                )
                 provider = "gemini"
 
             # Send initial metadata header event
@@ -141,53 +144,53 @@ async def chat_endpoint(req: ChatRequest):
 
             initial_event["routing"]["target_model"] = actual_model
             initial_event["routing"]["provider"] = provider
-            
+
             yield f"data: {json.dumps(initial_event)}\n\n"
 
             accumulated_tokens = []
             ttft_value = 0.0
 
-            async for chunk in model_switcher.stream_chat_response(
-                messages=compiled_messages,
-                target_model=route_res.target_model,
-                domain=route_res.domain
-            ):
-                if provider == "gemini":
-                    from core.providers.gemini_provider import generate_response
+            # Gemini cloud inference
+            if provider == "gemini":
+                from core.providers.gemini_provider import generate_response
 
-                    try:
-                        full_response = await asyncio.to_thread(
-                            generate_response,
-                            compiled_messages,
-                            actual_model
-                        )
-                    except RuntimeError as exc:
-                        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                try:
+                    full_response = await asyncio.to_thread(
+                        generate_response,
+                        compiled_messages,
+                        actual_model
+                    )
+
+                except RuntimeError as exc:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                    return
+
+                accumulated_tokens.append(full_response)
+
+                yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+
+            # Ollama local inference
+            else:
+                async for chunk in model_switcher.stream_chat_response(
+                    messages=compiled_messages,
+                    target_model=route_res.target_model,
+                    domain=route_res.domain
+                ):
+                    if chunk["type"] == "error":
+                        yield f"data: {json.dumps(chunk)}\n\n"
                         return
 
-                    accumulated_tokens.append(full_response)
+                    if chunk["type"] == "token":
+                        accumulated_tokens.append(chunk["content"])
 
-                    yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+                    elif chunk["type"] == "ttft":
+                        ttft_value = chunk["ttft_ms"]
 
-                else:
-                    async for chunk in model_switcher.stream_chat_response(
-                        messages=compiled_messages,
-                        target_model=route_res.target_model,
-                        domain=route_res.domain
-                    ):
-                        if chunk["type"] == "error":
-                            yield f"data: {json.dumps(chunk)}\n\n"
-                            return
-
-                        if chunk["type"] == "token":
-                            accumulated_tokens.append(chunk["content"])
-                        elif chunk["type"] == "ttft":
-                            ttft_value = chunk["ttft_ms"]
-
-                        yield f"data: {json.dumps(chunk)}\n\n"
+                    yield f"data: {json.dumps(chunk)}\n\n"
 
             # Auto-save interaction to vector memory
             full_response = "".join(accumulated_tokens)
+
             memory_store.insert(
                 text=f"User: {req.query[:80]} | Response: {full_response[:100]}",
                 domain=route_res.domain,
@@ -195,7 +198,10 @@ async def chat_endpoint(req: ChatRequest):
                 importance=0.75
             )
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream"
+        )
 
     else:
         # Non-streaming fallback
