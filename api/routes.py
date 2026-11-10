@@ -75,39 +75,49 @@ class McpInvokeRequest(BaseModel):
 # CHAT & INFERENCE ENDPOINTS
 # ==========================================
 
+
 @router.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     """
-    Main conversational pipeline:
-    1. Route query (<25ms)
-    2. Retrieve memory (<15ms)
-    3. Compile Universal Context Envelope (UCE)
-    4. Stage model & execute inference
-    5. Stream tokens and emit rich telemetry
+    Conversational pipeline:
+    1. Classify the request.
+    2. Retrieve relevant memory.
+    3. Compile the context envelope.
+    4. Try configured cloud providers with fallback.
+    5. Fall back to local Ollama inference.
+    6. Save the interaction and return telemetry.
     """
+    import asyncio
+
+    from core.providers.registry import generate_cloud_response
+
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    # 1. Routing
-    t_route_0 = time.perf_counter()
-    route_res = intent_router.route(req.query, forced_domain=req.domain_override)
+    # 1. Route the request
+    route_res = intent_router.route(
+        req.query,
+        forced_domain=req.domain_override
+    )
     t_route_ms = route_res.latency_ms
 
-    # 2. Memory Retrieval
+    # 2. Retrieve relevant memory
     retrieved, mem_latency_ms = memory_store.search(
         query=req.query,
         top_k=2,
         min_similarity=0.12
     )
-    injected_facts = [r["text"] for r in retrieved]
 
-    # 3. Create CDU & Compile Context Envelope
+    injected_facts = [item["text"] for item in retrieved]
+
+    # 3. Compile context
     cdu = UniversalContextEnvelope.create_cdu(
         role="user",
         content=req.query,
         source_model="client",
         domain=route_res.domain
     )
+
     compiled_messages = UniversalContextEnvelope.compile_for_model(
         cdus=[cdu],
         target_model=route_res.target_model,
@@ -115,138 +125,232 @@ async def chat_endpoint(req: ChatRequest):
         injected_facts=injected_facts
     )
 
+    # Shared metadata builder
+    def make_metadata(provider, model, fallback_providers):
+        routing = route_res.model_dump()
+        routing["target_model"] = model
+        routing["provider"] = provider
+
+        return {
+            "routing": routing,
+            "memory": {
+                "injected_count": len(retrieved),
+                "retrieved_facts": retrieved,
+                "lookup_latency_ms": mem_latency_ms
+            },
+            "provider_fallbacks": fallback_providers
+        }
+
+    # 4. Streaming response
     if req.stream:
+
         async def event_generator():
 
-            import asyncio
-            import os
+            cloud_result, cloud_failures = await asyncio.to_thread(
+                generate_cloud_response,
+                compiled_messages
+            )
 
-            actual_model = route_res.target_model
-            provider = "ollama"
+            fallback_providers = [
+                item["provider"] for item in cloud_failures
+            ]
 
-            if os.getenv("GEMINI_API_KEY"):
-                actual_model = os.getenv(
-                    "GEMINI_MODEL",
-                    "gemini-3.8-flash"
-                )
-                provider = "gemini"
+            # Cloud provider succeeded
+            if cloud_result:
+                provider = cloud_result["provider"]
+                actual_model = cloud_result["model"]
+                full_response = cloud_result["response"]
 
-            # Send initial metadata header event
-            initial_event = {
-                "type": "meta",
-                "routing": route_res.model_dump(),
-                "memory": {
-                    "injected_count": len(retrieved),
-                    "retrieved_facts": retrieved,
-                    "lookup_latency_ms": mem_latency_ms
+                initial_event = {
+                    "type": "meta",
+                    **make_metadata(
+                        provider,
+                        actual_model,
+                        fallback_providers
+                    )
                 }
-            }
 
-            initial_event["routing"]["target_model"] = actual_model
-            initial_event["routing"]["provider"] = provider
+                yield f"data: {json.dumps(initial_event)}\n\n"
 
-            yield f"data: {json.dumps(initial_event)}\n\n"
+                token_event = {
+                    "type": "token",
+                    "content": full_response
+                }
+                yield f"data: {json.dumps(token_event)}\n\n"
 
-            accumulated_tokens = []
-            ttft_value = 0.0
+            else:
+                # 5. Fall back to local Ollama
+                provider = "ollama"
+                actual_model = route_res.target_model
 
-            # Gemini cloud inference
-            if provider == "gemini":
-                from core.providers.gemini_provider import generate_response
+                initial_event = {
+                    "type": "meta",
+                    **make_metadata(
+                        provider,
+                        actual_model,
+                        fallback_providers
+                    )
+                }
+
+                yield f"data: {json.dumps(initial_event)}\n\n"
+
+                accumulated_tokens = []
 
                 try:
-                    full_response = await asyncio.to_thread(
-                        generate_response,
-                        compiled_messages,
-                        actual_model
-                    )
+                    async for chunk in model_switcher.stream_chat_response(
+                        messages=compiled_messages,
+                        target_model=route_res.target_model,
+                        domain=route_res.domain
+                    ):
+                        if chunk["type"] == "error":
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            return
 
-                except RuntimeError as exc:
-                    yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                        if chunk["type"] == "token":
+                            accumulated_tokens.append(chunk["content"])
+
+                        yield f"data: {json.dumps(chunk)}\n\n"
+
+                except Exception as exc:
+                    error_event = {
+                        "type": "error",
+                        "message": (
+                            "Local inference failed. "
+                            "Please check provider availability."
+                        )
+                    }
+                    print(f"[Chat] Ollama fallback failed: {exc}")
+                    yield f"data: {json.dumps(error_event)}\n\n"
                     return
 
-                accumulated_tokens.append(full_response)
+                full_response = "".join(accumulated_tokens)
 
-                yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
-
-            # Ollama local inference
-            else:
-                async for chunk in model_switcher.stream_chat_response(
-                    messages=compiled_messages,
-                    target_model=route_res.target_model,
-                    domain=route_res.domain
-                ):
-                    if chunk["type"] == "error":
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                        return
-
-                    if chunk["type"] == "token":
-                        accumulated_tokens.append(chunk["content"])
-
-                    elif chunk["type"] == "ttft":
-                        ttft_value = chunk["ttft_ms"]
-
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-            # Auto-save interaction to vector memory
-            full_response = "".join(accumulated_tokens)
-
-            memory_store.insert(
-                text=f"User: {req.query[:80]} | Response: {full_response[:100]}",
-                domain=route_res.domain,
-                source_model=actual_model,
-                importance=0.75
-            )
+            # 6. Save successful interaction
+            if full_response.strip():
+                memory_store.insert(
+                    text=(
+                        f"User: {req.query[:80]} | "
+                        f"Response: {full_response[:100]}"
+                    ),
+                    domain=route_res.domain,
+                    source_model=actual_model,
+                    importance=0.75
+                )
 
         return StreamingResponse(
             event_generator(),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
         )
 
-    else:
-        # Non-streaming fallback
-        try:
-            response_text, telemetry = model_switcher.generate_chat_response(
-                messages=compiled_messages,
-                target_model=route_res.target_model,
-                domain=route_res.domain
-            )
-        except RuntimeError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Inference unavailable. No model provider could complete the request."
-            ) from exc
+    # 7. Non-streaming response
+    cloud_result, cloud_failures = await asyncio.to_thread(
+        generate_cloud_response,
+        compiled_messages
+    )
 
-        # Record telemetry
-        telemetry_tracker.record_inference(
-            domain=route_res.domain,
-            model=telemetry["model_used"],
-            ttft_ms=telemetry["ttft_ms"],
-            tps=telemetry["tps"],
-            route_latency_ms=t_route_ms,
-            mem_latency_ms=mem_latency_ms,
-            is_hot=telemetry["swap_decomposition"]["is_hot_switch"],
-            swap_total_ms=telemetry["swap_decomposition"]["t_total_ms"]
-        )
+    fallback_providers = [
+        item["provider"] for item in cloud_failures
+    ]
 
-        # Store to vector memory
+    if cloud_result:
+        provider = cloud_result["provider"]
+        actual_model = cloud_result["model"]
+        response_text = cloud_result["response"]
+
+        routing = route_res.model_dump()
+        routing["target_model"] = actual_model
+        routing["provider"] = provider
+        routing["provider_fallbacks"] = fallback_providers
+
         memory_store.insert(
-            text=f"User: {req.query[:80]} | Response: {response_text[:100]}",
+            text=(
+                f"User: {req.query[:80]} | "
+                f"Response: {response_text[:100]}"
+            ),
             domain=route_res.domain,
-            source_model=telemetry["model_used"],
+            source_model=actual_model,
             importance=0.75
         )
 
         return {
             "output": response_text,
-            "routing": route_res.model_dump(),
-            "telemetry": telemetry,
+            "routing": routing,
+            "telemetry": {
+                "provider": provider,
+                "model_used": actual_model,
+                "inference_latency_ms": cloud_result[
+                    "inference_latency_ms"
+                ],
+                "ttft_ms": None,
+                "tps": None
+            },
             "memory": {
                 "injected_count": len(retrieved),
                 "retrieved_facts": retrieved,
                 "lookup_latency_ms": mem_latency_ms
             }
         }
+
+    # All configured cloud providers failed or no cloud key exists.
+    # Try local Ollama.
+    try:
+        response_text, telemetry = model_switcher.generate_chat_response(
+            messages=compiled_messages,
+            target_model=route_res.target_model,
+            domain=route_res.domain
+        )
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "All configured inference providers are unavailable. "
+                "Check cloud API keys, provider limits and local Ollama."
+            )
+        ) from exc
+
+    telemetry_tracker.record_inference(
+        domain=route_res.domain,
+        model=telemetry["model_used"],
+        ttft_ms=telemetry["ttft_ms"],
+        tps=telemetry["tps"],
+        route_latency_ms=t_route_ms,
+        mem_latency_ms=mem_latency_ms,
+        is_hot=telemetry["swap_decomposition"]["is_hot_switch"],
+        swap_total_ms=telemetry["swap_decomposition"]["t_total_ms"]
+    )
+
+    memory_store.insert(
+        text=(
+            f"User: {req.query[:80]} | "
+            f"Response: {response_text[:100]}"
+        ),
+        domain=route_res.domain,
+        source_model=telemetry["model_used"],
+        importance=0.75
+    )
+
+    routing = route_res.model_dump()
+    routing["provider"] = "ollama"
+    routing["provider_fallbacks"] = fallback_providers
+
+    return {
+        "output": response_text,
+        "routing": routing,
+        "telemetry": {
+            **telemetry,
+            "provider": "ollama"
+        },
+        "memory": {
+            "injected_count": len(retrieved),
+            "retrieved_facts": retrieved,
+            "lookup_latency_ms": mem_latency_ms
+        }
+    }
 
 
 # ==========================================
