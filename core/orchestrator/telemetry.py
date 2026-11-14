@@ -22,34 +22,42 @@ class TelemetryTracker:
         self.cold_switches = 0
 
     def record_inference(
-        self,
-        domain: str,
-        model: str,
-        ttft_ms: float,
-        tps: float,
-        route_latency_ms: float,
-        mem_latency_ms: float,
-        is_hot: bool,
-        swap_total_ms: float
-    ):
-        self.total_queries += 1
+    self,
+    domain: str,
+    model: str,
+    ttft_ms: Optional[float],
+    tps: Optional[float],
+    route_latency_ms: float,
+    mem_latency_ms: float,
+    is_hot: bool = False,
+    swap_total_ms: float = 0.0,
+    provider: str = "ollama"
+):
+    self.total_queries += 1
+
+    if provider == "ollama":
         if is_hot:
             self.hot_switches += 1
         else:
             self.cold_switches += 1
 
-        self.ttft_history.append(ttft_ms)
-        self.tps_history.append(tps)
-        self.routing_latencies.append(route_latency_ms)
-        self.memory_retrieval_latencies.append(mem_latency_ms)
         self.swap_events.append({
             "timestamp": time.time(),
             "domain": domain,
             "model": model,
+            "provider": provider,
             "is_hot": is_hot,
             "swap_total_ms": swap_total_ms
         })
 
+    if ttft_ms is not None:
+        self.ttft_history.append(ttft_ms)
+
+    if tps is not None:
+        self.tps_history.append(tps)
+
+    self.routing_latencies.append(route_latency_ms)
+    self.memory_retrieval_latencies.append(mem_latency_ms)
     def get_summary(self) -> Dict[str, Any]:
         avg_ttft = sum(self.ttft_history) / len(self.ttft_history) if self.ttft_history else 0.0
         avg_tps = sum(self.tps_history) / len(self.tps_history) if self.tps_history else 0.0

@@ -155,6 +155,8 @@ async def chat_endpoint(req: ChatRequest):
                 item["provider"] for item in cloud_failures
             ]
 
+            stream_telemetry = {}
+
             # Cloud provider succeeded
             if cloud_result:
                 provider = cloud_result["provider"]
@@ -181,20 +183,10 @@ async def chat_endpoint(req: ChatRequest):
             else:
                 # 5. Fall back to local Ollama
                 provider = "ollama"
-                actual_model = route_res.target_model
-
-                initial_event = {
-                    "type": "meta",
-                    **make_metadata(
-                        provider,
-                        actual_model,
-                        fallback_providers
-                    )
-                }
-
-                yield f"data: {json.dumps(initial_event)}\n\n"
 
                 accumulated_tokens = []
+                actual_model = None
+                stream_telemetry = {}
 
                 try:
                     async for chunk in model_switcher.stream_chat_response(
@@ -202,28 +194,61 @@ async def chat_endpoint(req: ChatRequest):
                         target_model=route_res.target_model,
                         domain=route_res.domain
                     ):
-                        if chunk["type"] == "error":
+                        if chunk["type"] == "staging":
+                            actual_model = chunk.get("model")
+
+                            initial_event = {
+                                "type": "meta",
+                                **make_metadata(
+                                    provider,
+                                    actual_model or route_res.target_model,
+                                    fallback_providers
+                                )
+                            }
+
+                            yield f"data: {json.dumps(initial_event)}\n\n"
+
+                        elif chunk["type"] == "token":
+                            accumulated_tokens.append(chunk["content"])
+
+                        elif chunk["type"] == "done":
+                            stream_telemetry = chunk
+
+                        elif chunk["type"] == "error":
                             yield f"data: {json.dumps(chunk)}\n\n"
                             return
-
-                        if chunk["type"] == "token":
-                            accumulated_tokens.append(chunk["content"])
 
                         yield f"data: {json.dumps(chunk)}\n\n"
 
                 except Exception as exc:
                     error_event = {
                         "type": "error",
-                        "message": (
-                            "Local inference failed. "
-                            "Please check provider availability."
-                        )
+                        "error": "Local inference failed. Please check provider availability."
                     }
+                    print(f"[Chat] Ollama fallback failed: {type(exc).__name__}: {exc}")
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                    return
+
+                full_response = "".join(accumulated_tokens)
+
                     print(f"[Chat] Ollama fallback failed: {exc}")
                     yield f"data: {json.dumps(error_event)}\n\n"
                     return
 
                 full_response = "".join(accumulated_tokens)
+
+                if full_response.strip():
+                    telemetry_tracker.record_inference(
+                        domain=route_res.domain,
+                        model=actual_model or route_res.target_model,
+                        ttft_ms=stream_telemetry.get("ttft_ms"),
+                        tps=stream_telemetry.get("tps"),
+                        route_latency_ms=t_route_ms,
+                        mem_latency_ms=mem_latency_ms,
+                        is_hot=stream_telemetry.get("is_hot", False),
+                        swap_total_ms=stream_telemetry.get("swap_total_ms", 0.0),
+                        provider=provider
+                    )
 
             # 6. Save successful interaction
             if full_response.strip():
@@ -265,6 +290,15 @@ async def chat_endpoint(req: ChatRequest):
         routing["target_model"] = actual_model
         routing["provider"] = provider
         routing["provider_fallbacks"] = fallback_providers
+        telemetry_tracker.record_inference(
+            domain=route_res.domain,
+            model=actual_model,
+            ttft_ms=None,
+            tps=None,
+            route_latency_ms=t_route_ms,
+            mem_latency_ms=mem_latency_ms,
+            provider=provider
+        )
 
         memory_store.insert(
             text=(
@@ -316,12 +350,17 @@ async def chat_endpoint(req: ChatRequest):
     telemetry_tracker.record_inference(
         domain=route_res.domain,
         model=telemetry["model_used"],
-        ttft_ms=telemetry["ttft_ms"],
-        tps=telemetry["tps"],
+        ttft_ms=telemetry.get("ttft_ms"),
+        tps=telemetry.get("tps"),
         route_latency_ms=t_route_ms,
         mem_latency_ms=mem_latency_ms,
-        is_hot=telemetry["swap_decomposition"]["is_hot_switch"],
-        swap_total_ms=telemetry["swap_decomposition"]["t_total_ms"]
+        is_hot=telemetry.get("swap_decomposition", {}).get(
+            "is_hot_switch", False
+        ),
+        swap_total_ms=telemetry.get("swap_decomposition", {}).get(
+            "t_total_ms", 0.0
+        ),
+        provider="ollama"
     )
 
     memory_store.insert(

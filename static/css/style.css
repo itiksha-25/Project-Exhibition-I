@@ -1085,3 +1085,66 @@ body.dark-theme {
   color: var(--text-muted);
   line-height: 1.8;
 }
+
+/* Improved chat response formatting */
+
+.code-preview {
+  display: block;
+  overflow-x: auto;
+  white-space: pre;
+  padding: 16px;
+  margin: 12px 0;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  line-height: 1.65;
+  font-size: 13px;
+}
+
+.inline-code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--accent-cyan);
+  font-family: monospace;
+}
+
+.math-inline {
+  font-family: "Times New Roman", serif;
+  font-style: italic;
+}
+
+.math-block {
+  overflow-x: auto;
+  margin: 14px 0;
+  padding: 10px;
+  text-align: center;
+  font-family: "Times New Roman", serif;
+  font-size: 16px;
+}
+
+.assistant-message h2,
+.assistant-message h3,
+.assistant-message h4 {
+  margin: 16px 0 8px;
+}
+
+.assistant-message ul,
+.assistant-message ol {
+  padding-left: 24px;
+  margin: 10px 0;
+}
+
+.assistant-message li {
+  margin: 5px 0;
+}
+
+.assistant-message p {
+  margin: 9px 0;
+  line-height: 1.65;
+}
+
+.assistant-message hr {
+  border: 0;
+  border-top: 1px solid rgba(255,255,255,0.15);
+  margin: 16px 0;
+}

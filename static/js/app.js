@@ -240,63 +240,158 @@ document.addEventListener("DOMContentLoaded", () => {
         const lines = buffer.split("\n\n");
         buffer = lines.pop(); // Keep incomplete chunk
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ")) continue;
-          const jsonStr = trimmed.substring(6);
+        
+for (const line of lines) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data: ")) continue;
 
-          try {
-            const event = JSON.parse(jsonStr);
+  const jsonStr = trimmed.substring(6);
 
-            if (event.type === "meta") {
-              const r = event.routing;
-              const mem = event.memory;
+  try {
+    const event = JSON.parse(jsonStr);
 
-              // Render badges in message header
-              assistantBadgesBar.innerHTML = `
-                <span class="badge-chip domain">${r.domain_name} (${(r.confidence * 100).toFixed(0)}%)</span>
-                <span class="badge-chip model">${r.target_model} [${r.recommended_quant}]</span>
-                <span class="badge-chip latency">⚡ Router: ${r.latency_ms}ms</span>
-                ${mem.injected_count > 0 ? `<span class="badge-chip hot">🧠 Recalled ${mem.injected_count} Context Facts</span>` : ""}
-              `;
+    if (event.type === "meta") {
+      const r = event.routing || {};
+      const mem = event.memory || {};
+      const provider = r.provider || "unknown";
+      const isOllama = provider === "ollama";
 
-              // Update Sidebar Inspector
-              insDomain.textContent = `${r.domain_name} (${(r.confidence * 100).toFixed(0)}%)`;
-              insModel.textContent = `${r.target_model}`;
-              insQuant.textContent = `${r.recommended_quant} (Min ${r.min_precision_bits}-bit)`;
-              insRouteLatency.textContent = `${r.latency_ms} ms (${r.decision_tier})`;
-              insMemLatency.textContent = `${mem.lookup_latency_ms} ms`;
-            } else if (event.type === "staging") {
-              const swap = event.swap;
-              latEvictVal.textContent = `${swap.t_evict_ms} ms`;
-              latLoadVal.textContent = `${swap.t_load_ms} ms`;
-              latInferVal.textContent = `${swap.t_infer_ms} ms`;
+      const escapeHtml = (value) =>
+        String(value ?? "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        })[char]);
 
-              const maxMs = Math.max(1000, swap.t_total_ms);
-              barEvict.style.width = `${(swap.t_evict_ms / maxMs) * 100}%`;
-              barLoad.style.width = `${(swap.t_load_ms / maxMs) * 100}%`;
-              barInfer.style.width = `${(swap.t_infer_ms / maxMs) * 100}%`;
+      const domain = escapeHtml(r.domain_name || "General");
+      const model = escapeHtml(r.target_model || "Unknown model");
+      const providerLabel = escapeHtml(provider.toUpperCase());
+      const confidence = Number(r.confidence || 0);
+      const fallbacks = (event.provider_fallbacks || [])
+        .map(escapeHtml);
 
-              if (swap.is_hot_switch) {
-                badgeSwitchState.textContent = "HOT CACHE (0ms swap)";
-                badgeSwitchState.className = "badge-tag hot";
-              } else {
-                badgeSwitchState.textContent = `COLD SWITCH (${swap.t_load_ms}ms I/O)`;
-                badgeSwitchState.className = "badge-tag cold";
-              }
-            } else if (event.type === "ttft") {
-              insTtftTps.textContent = `${event.ttft_ms} ms / -- tps`;
-            } else if (event.type === "token") {
-              fullTokens += event.content;
-              assistantTextEl.innerHTML = formatMarkdown(fullTokens);
-              chatMessages.scrollTop = chatMessages.scrollHeight;
-            } else if (event.type === "done") {
-              insTtftTps.textContent = `${insTtftTps.textContent.split("/")[0].trim()} / ${event.tps} tps`;
-            }
-          } catch (err) {
-            console.error("SSE parse error:", err);
-          }
-        }
+      const modelLabel = isOllama
+        ? `${model} [${escapeHtml(r.recommended_quant || "N/A")}]`
+        : `${providerLabel}: ${model}`;
+
+      assistantBadgesBar.innerHTML = `
+        <span class="badge-chip domain">
+          ${domain} (${(confidence * 100).toFixed(0)}%)
+        </span>
+        <span class="badge-chip model">${modelLabel}</span>
+        <span class="badge-chip latency">
+          ⚡ Router: ${escapeHtml(r.latency_ms ?? "N/A")}ms
+        </span>
+        ${mem.injected_count > 0
+          ? `<span class="badge-chip hot">
+              🧠 Recalled ${Number(mem.injected_count)} Context Facts
+            </span>`
+          : ""}
+        ${fallbacks.length > 0
+          ? `<span class="badge-chip latency">
+              Fallback: ${fallbacks.join(" → ")}
+            </span>`
+          : ""}
+      `;
+
+      // Update sidebar inspector
+      insDomain.textContent =
+        `${r.domain_name || "General"} (${(confidence * 100).toFixed(0)}%)`;
+
+      insModel.textContent = r.target_model || "Unknown";
+
+      insQuant.textContent = isOllama
+        ? `${r.recommended_quant || "N/A"} (Min ${r.min_precision_bits ?? "N/A"}-bit)`
+        : "Cloud inference (quantization not reported)";
+
+      insRouteLatency.textContent =
+        `${r.latency_ms ?? "N/A"} ms (${r.decision_tier || "N/A"})`;
+
+      insMemLatency.textContent =
+        `${mem.lookup_latency_ms ?? "N/A"} ms`;
+
+      // Reset local-model swap metrics for cloud inference
+      if (!isOllama) {
+        latEvictVal.textContent = "N/A";
+        latLoadVal.textContent = "N/A";
+        latInferVal.textContent = "Cloud inference";
+
+        barEvict.style.width = "0%";
+        barLoad.style.width = "0%";
+        barInfer.style.width = "0%";
+
+        badgeSwitchState.textContent = "CLOUD PROVIDER";
+        badgeSwitchState.className = "badge-tag hot";
+
+        insTtftTps.textContent = "N/A / N/A";
+      }
+    }
+
+    else if (event.type === "staging") {
+      const swap = event.swap;
+
+      latEvictVal.textContent = `${swap.t_evict_ms} ms`;
+      latLoadVal.textContent = `${swap.t_load_ms} ms`;
+      latInferVal.textContent = `${swap.t_infer_ms} ms`;
+
+      const maxMs = Math.max(1000, swap.t_total_ms);
+
+      barEvict.style.width =
+        `${(swap.t_evict_ms / maxMs) * 100}%`;
+
+      barLoad.style.width =
+        `${(swap.t_load_ms / maxMs) * 100}%`;
+
+      barInfer.style.width =
+        `${(swap.t_infer_ms / maxMs) * 100}%`;
+
+      if (swap.is_hot_switch) {
+        badgeSwitchState.textContent = "HOT CACHE (0ms swap)";
+        badgeSwitchState.className = "badge-tag hot";
+      } else {
+        badgeSwitchState.textContent =
+          `COLD SWITCH (${swap.t_load_ms}ms I/O)`;
+        badgeSwitchState.className = "badge-tag cold";
+      }
+    }
+
+    else if (event.type === "ttft") {
+      insTtftTps.textContent = `${event.ttft_ms} ms / -- tps`;
+    }
+
+    else if (event.type === "token") {
+      fullTokens += event.content || "";
+      assistantTextEl.innerHTML = formatMarkdown(fullTokens);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    else if (event.type === "done") {
+      const previousTtft =
+        insTtftTps.textContent.split("/")[0].trim();
+
+      insTtftTps.textContent =
+        `${previousTtft} / ${event.tps ?? "N/A"} tps`;
+    }
+
+    else if (event.type === "error") {
+      const errorMessage =
+        event.message || "Inference failed. Please try again.";
+
+      assistantTextEl.textContent =
+        fullTokens
+          ? `${fullTokens}\n\nError: ${errorMessage}`
+          : `Error: ${errorMessage}`;
+
+      console.error("[Inference Error]", errorMessage);
+    }
+
+  } catch (err) {
+    console.error("SSE parse error:", err);
+  }
+}
+
       }
     } catch (e) {
       assistantTextEl.innerHTML = `<p style="color: var(--accent-rose);">Error connecting to local SLM engine: ${e.message}</p>`;
@@ -810,35 +905,179 @@ document.addEventListener("DOMContentLoaded", () => {
       .replace(/>/g, "&gt;");
   }
 
-  function formatMarkdown(text) {
-    let html = escapeHtml(text);
+  
+function formatMarkdown(text) {
+  if (typeof text !== "string") return "";
 
-    // Convert raw LaTeX math formulas into clean, readable text/HTML
-    html = html.replace(/\$T_{\\text\{total\}\}\s*=\s*T_{\\text\{evict\}\}\s*\+\s*T_{\\text\{load\}\}\s*\+\s*T_{\\text\{infer\}\}\$/g, 'T<sub>total</sub> = T<sub>evict</sub> + T<sub>load</sub> + T<sub>infer</sub>');
-    html = html.replace(/T_{\\text\{([a-zA-Z0-9_]+)\}\}/g, 'T<sub>$1</sub>');
-    html = html.replace(/\\Delta\s*S\s*\\ge\s*0/g, 'ΔS ≥ 0');
-    html = html.replace(/\\Delta/g, 'Δ');
-    html = html.replace(/\\ge/g, '≥');
-    html = html.replace(/\\le/g, '≤');
-    html = html.replace(/\\lambda/g, 'λ');
-    html = html.replace(/\\cdot/g, '·');
-    html = html.replace(/\\pi/g, 'π');
-    html = html.replace(/\\int/g, '∫');
-    html = html.replace(/\\sum/g, '∑');
-    html = html.replace(/\\sqrt\{([^}]+)\}/g, '√($1)');
-    html = html.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1 / $2)');
-    html = html.replace(/\$([^\$]+)\$/g, '<code class="math-inline">$1</code>');
+  let html = escapeHtml(text);
 
-    // Simple code block formatting
-    html = html.replace(/```([a-zA-Z]*)\n([\s\S]*?)```/g, '<pre class="code-preview font-mono"><code>$2</code></pre>');
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; color: var(--accent-cyan); font-family: monospace;">$1</code>');
-    // Bold
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    // Bullet lists
-    html = html.replace(/^\s*-\s+(.*)$/gm, '<li style="margin-left: 20px;">$1</li>');
-    // Paragraphs
-    html = html.replace(/\n\n+/g, '</p><p>');
-    return `<p>${html}</p>`;
+  // Preserve fenced code blocks before processing other Markdown.
+  const codeBlocks = [];
+
+  html = html.replace(
+    /```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```/g,
+    (match, language, code) => {
+      const index = codeBlocks.length;
+      const lang = language || "text";
+
+      codeBlocks.push(
+        `<pre class="code-preview font-mono"><code class="language-${lang}">${code.replace(/\n$/, "")}</code></pre>`
+      );
+
+      return `@@CODEBLOCK_${index}@@`;
+    }
+  );
+
+  // Preserve inline code.
+  const inlineCodes = [];
+
+  html = html.replace(/`([^`\n]+)`/g, (match, code) => {
+    const index = inlineCodes.length;
+
+    inlineCodes.push(
+      `<code class="inline-code">${code}</code>`
+    );
+
+    return `@@INLINECODE_${index}@@`;
+  });
+
+  // Convert common LaTeX commands into readable symbols.
+  const mathReplacements = [
+    [/\\times/g, "×"],
+    [/\\cdot/g, "·"],
+    [/\\geq?/g, "≥"],
+    [/\\leq?/g, "≤"],
+    [/\\neq/g, "≠"],
+    [/\\approx/g, "≈"],
+    [/\\Delta/g, "Δ"],
+    [/\\lambda/g, "λ"],
+    [/\\pi/g, "π"],
+    [/\\theta/g, "θ"],
+    [/\\sqrt\{([^{}]+)\}/g, "√($1)"],
+    [/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1 / $2)"],
+    [/\\text\{([^{}]+)\}/g, "$1"],
+    [/\\left/g, ""],
+    [/\\right/g, ""],
+    [/\\,/g, " "],
+    [/\\;/g, " "],
+    [/\\!/g, ""]
+  ];
+
+  for (const [pattern, replacement] of mathReplacements) {
+    html = html.replace(pattern, replacement);
   }
-});
+
+  // Convert common math delimiters into readable math spans.
+  html = html.replace(
+    /\\\[([\s\S]*?)\\\]/g,
+    '<div class="math-block">$1</div>'
+  );
+
+  html = html.replace(
+    /\\\(([\s\S]*?)\\\)/g,
+    '<span class="math-inline">$1</span>'
+  );
+
+  html = html.replace(
+    /\$\$([\s\S]*?)\$\$/g,
+    '<div class="math-block">$1</div>'
+  );
+
+  html = html.replace(
+    /\$([^$\n]+)\$/g,
+    '<span class="math-inline">$1</span>'
+  );
+
+  // Convert headings.
+  html = html.replace(
+    /^###\s+(.+)$/gm,
+    "<h4>$1</h4>"
+  );
+
+  html = html.replace(
+    /^##\s+(.+)$/gm,
+    "<h3>$1</h3>"
+  );
+
+  html = html.replace(
+    /^#\s+(.+)$/gm,
+    "<h2>$1</h2>"
+  );
+
+  // Horizontal rules.
+  html = html.replace(
+    /^\s*[-*_]{3,}\s*$/gm,
+    "<hr>"
+  );
+
+  // Bold and italic.
+  html = html.replace(
+    /\*\*(.+?)\*\*/g,
+    "<strong>$1</strong>"
+  );
+
+  html = html.replace(
+    /\*(.+?)\*/g,
+    "<em>$1</em>"
+  );
+
+  // Convert unordered lists.
+  html = html.replace(
+    /(?:^|\n)((?:\s*[-*+]\s+.+(?:\n|$))+)/g,
+    (match, list) => {
+      const items = list
+        .trim()
+        .split("\n")
+        .map(item =>
+          `<li>${item.replace(/^\s*[-*+]\s+/, "")}</li>`
+        )
+        .join("");
+
+      return `\n<ul>${items}</ul>\n`;
+    }
+  );
+
+  // Convert numbered lists.
+  html = html.replace(
+    /(?:^|\n)((?:\s*\d+\.\s+.+(?:\n|$))+)/g,
+    (match, list) => {
+      const items = list
+        .trim()
+        .split("\n")
+        .map(item =>
+          `<li>${item.replace(/^\s*\d+\.\s+/, "")}</li>`
+        )
+        .join("");
+
+      return `\n<ol>${items}</ol>\n`;
+    }
+  );
+
+  // Paragraphs and line breaks.
+  const blocks = html
+    .split(/\n{2,}/)
+    .map(block => block.trim())
+    .filter(Boolean);
+
+  html = blocks.map(block => {
+    if (
+      /^<(h[2-4]|ul|ol|pre|div|hr)/.test(block) ||
+      /^@@CODEBLOCK_\d+@@$/.test(block)
+    ) {
+      return block;
+    }
+
+    return `<p>${block.replace(/\n/g, "<br>")}</p>`;
+  }).join("\n");
+
+  // Restore inline code and fenced code blocks.
+  inlineCodes.forEach((code, index) => {
+    html = html.replace(`@@INLINECODE_${index}@@`, code);
+  });
+
+  codeBlocks.forEach((code, index) => {
+    html = html.replace(`@@CODEBLOCK_${index}@@`, code);
+  });
+
+  return html;
+}

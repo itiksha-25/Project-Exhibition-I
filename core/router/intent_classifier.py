@@ -41,7 +41,8 @@ class IntentRouter:
 
     def route(self, query: str, forced_domain: Optional[str] = None) -> RouteResult:
         """
-        Routes the user prompt to the optimal domain and SLM.
+        Routes the user prompt to the most suitable domain and recommends a local SLM.
+        Cloud inference providers are selected separately by the provider registry.
         Enforces T_route < 25.0ms.
         """
         t_start = time.perf_counter()
@@ -97,15 +98,23 @@ class IntentRouter:
             domain_name=domain_meta["name"],
             confidence=round(conf, 4),
             secondary_domain=sec_domain,
+
+            # This is the recommended LOCAL model for this domain.
             target_model=domain_meta["primary_model"],
+
+            # These fields describe local Ollama configuration only.
             recommended_quant=domain_meta["recommended_quant"],
             min_precision_bits=domain_meta["min_precision_bits"],
+
             decision_tier=tier,
             decision_rationale=rationale,
             latency_ms=latency_ms,
             budget_adhered=budget_ok,
-            domain_probabilities={k: round(v, 4) for k, v in probs.items()}
+            domain_probabilities={
+                k: round(v, 4) for k, v in probs.items()
+            }
         )
+
 
         self.history.append({
             "timestamp": time.time(),
